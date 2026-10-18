@@ -111,8 +111,8 @@ OpenCode 免费层的 muse-spark-\* 系上游原生说 Responses 协议，`/v1/r
 |---|---|---|
 | `API_KEY` | — | 本地鉴权 Bearer token |
 | `PORT` | `8390` | 监听端口 |
-| `API_BASE`（env `ZEN_BASE` 历史名） | `…/inference/v1` | inference 通道基址（`.env` 里残留的 `ZEN_BASE=…/inference/v1` 仍作用于它） |
-| `LEGACY_ZEN_BASE` | `…/zen/v1` | zen 通道基址（2026-10-18 起优先通道；⚠ 与历史 env `ZEN_BASE` 是两回事） |
+| `ZEN_BASE` | `https://opencode.ai/zen/v1` | zen 通道基址（2026-10-18 起优先通道） |
+| `INFERENCE_BASE` | `https://opencode.ai/inference/v1` | inference 通道基址（回落通道） |
 | `UPSTREAM_AUTH` | `Bearer public` | 上游鉴权（免费层匿名，两通道同） |
 | `UPSTREAM_COOLDOWN` | `600` | 403 FreeTierError 后该通道冷却秒数 |
 | `UPSTREAM_COOLDOWN_429` | `60` | 429 限流后该通道冷却秒数 |

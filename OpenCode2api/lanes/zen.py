@@ -17,8 +17,7 @@
   5) stream:true 必需；鉴权 `Bearer public`；session 与 inference 同源校验
      （降序 TypeID，由 server 统一生成后传入，共用 session_cache.json）。
 
-env：`LEGACY_ZEN_BASE` 覆盖基址（⚠ 历史变量 `ZEN_BASE` 属 inference 通道，
-勿混用——2026-10-18 实测曾把本通道错误指到 /inference/v1）。
+env：`ZEN_BASE` 覆盖本通道基址（默认 `https://opencode.ai/zen/v1`）。
 """
 import os
 import platform
@@ -27,7 +26,7 @@ import string
 
 NAME = "zen"
 
-BASE = (os.environ.get("LEGACY_ZEN_BASE", "").strip()
+BASE = (os.environ.get("ZEN_BASE", "").strip()
         or ("https://" + "opencode" + ".ai" + "/zen/v1"))
 
 # 免费层匿名面：只认字面 `Bearer public`；真实 sk- key 反而 401。

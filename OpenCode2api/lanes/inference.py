@@ -25,13 +25,13 @@ inference 门禁时只改本文件；server.py 通过 build_headers()/prepare_bo
   x-opencode-project  不校验（global）             vs  prj_+24hex
   工具门禁       bash+read 最少集 + 真实 schema    vs  仅需一个 read
 
-env：`ZEN_BASE`（历史名，勿被字面误导）覆盖本通道基址。
+env：`INFERENCE_BASE` 覆盖本通道基址（默认 `https://opencode.ai/inference/v1`）。
 """
 import os
 
 NAME = "inference"
 
-BASE = (os.environ.get("ZEN_BASE", "").strip()
+BASE = (os.environ.get("INFERENCE_BASE", "").strip()
         or ("https://" + "opencode" + ".ai" + "/inference/v1"))
 
 # 免费层匿名面：只认字面 `Bearer public`；真实 sk- key 反而 401。
