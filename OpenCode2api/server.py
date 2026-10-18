@@ -1,14 +1,20 @@
 # -*- coding: utf-8 -*-
 """the unit2api：OpenAI 兼容反代 → OpenCode 免费层网关直连，只放行 free 模型。
 
-架构：**双通道直连**，每通道一个自包含文件（门禁规格全在各自文件里，上游改
-门禁只改对应文件，不动 server.py）：
+架构：**双通道直连 + 协议适配层**。
 
+通道（每通道一个自包含文件在仓库根，门禁规格全在各自文件里，上游改门禁
+只改对应文件）：
   lane_zen.py       legacy /zen/v1 —— v1.3.7 形状，仅需一个 read 工具（优先）
   lane_inference.py /inference/v1 —— 2.x 指纹，bash+read 最少集（回落）
 
+协议层（adapters/，每协议一个文件，只放协议路由与翻译桥）：
+  adapters/routes_chat.py        /v1/chat/completions
+  adapters/routes_responses.py   /v1/responses
+  adapters/routes_messages.py    /v1/messages（经 adapters/anthropic_bridge.py 翻译）
+
 server.py 只留公共设施：session 指纹（两通道同源校验，共用缓存）、dumps、
-模型清单、三协议路由、通道选择与冷却调度。
+模型清单、通道选择与冷却调度、协议层挂载。
 
 通道顺序用 `UPSTREAM_LANES` 配置（逗号分隔，默认 `zen,inference`）：
   UPSTREAM_LANES=zen,inference   双通道（默认，zen 优先）
@@ -35,8 +41,9 @@ from dotenv import load_dotenv
 from flask import Flask, Response, g, jsonify, request
 
 from adapters import anthropic_bridge   # noqa: F401 兼容旧探针的 server.anthropic_bridge
-from adapters import lane_inference, lane_zen
 from adapters import routes_chat, routes_messages, routes_responses
+import lane_inference
+import lane_zen
 
 load_dotenv()
 

@@ -1,1 +1,1 @@
-# adapters/ — 协议适配层：三协议路由 + 双通道 lane + 翻译桥，server.py 只做调度
+# adapters/ — 协议适配层：三协议路由 + 协议翻译桥（通道 lane_*.py 在仓库根）
