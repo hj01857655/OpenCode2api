@@ -62,10 +62,6 @@ _LANE_MODS = {"zen": zen, "inference": inference}
 _LANE_ORDER = [s.strip() for s in
                os.environ.get("UPSTREAM_LANES", "zen,inference").split(",")
                if s.strip() in _LANE_MODS] or ["zen", "inference"]
-# 兼容别名：旧引用点（_fetch_free / 探针）仍可用
-API_BASE = inference.BASE
-ZEN_BASE = zen.BASE
-_LANES = {name: mod.BASE for name, mod in _LANE_MODS.items()}
 # 上游已废弃模型（实测 410 ModelDeprecated）：剔除，避免误调必失败
 DEPRECATED = inference.DEPRECATED
 
@@ -86,12 +82,12 @@ logging.getLogger("werkzeug").disabled = True
 # 历史上踩过两次：10-15 `.env` 的 ZEN_BASE 还写 /zen/v1 导致全档 403；10-18 探测
 # 又把 zen 通道指到 /inference/v1。现在 ZEN_BASE / INFERENCE_BASE 按通道命名，值必须
 # 和通道对上，否则门禁形状和通道不符，上游一律 403。
-if "/inference" in ZEN_BASE:
+if "/inference" in zen.BASE:
     logger.warning("ZEN_BASE 指向 /inference/v1（%s）：zen 通道会用 inference 的地址，"
-                   "两通道将打到同一处。zen 通道应设 https://opencode.ai/zen/v1", ZEN_BASE)
-if "/zen/" in API_BASE:
+                   "两通道将打到同一处。zen 通道应设 https://opencode.ai/zen/v1", zen.BASE)
+if "/zen/" in inference.BASE:
     logger.warning("INFERENCE_BASE 指向 /zen/v1（%s）：inference 通道会用 zen 的地址。"
-                   "inference 通道应设 https://opencode.ai/inference/v1", API_BASE)
+                   "inference 通道应设 https://opencode.ai/inference/v1", inference.BASE)
 
 # ── dumps（只落 body 原文）───────────────────────────────────────────────────
 DUMP_DIR = os.environ.get("DUMP_DIR", "") or os.path.join(BASE, "dumps")
@@ -349,7 +345,6 @@ _COOLDOWN_S = int(os.getenv("UPSTREAM_COOLDOWN", "600"))          # 403 指纹�
 _COOLDOWN_429_S = int(os.getenv("UPSTREAM_COOLDOWN_429", "60"))   # 429 限流
 _gate = {"zen": 0.0, "inference": 0.0}
 _gate_lock = threading.Lock()
-_LANES = {"zen": ZEN_BASE, "inference": API_BASE}
 
 
 def _lane_cooling(lane):
@@ -380,7 +375,7 @@ def _post_lane(lane, path, payload, seed, rid, timeout, flat=False):
         try:
             with _upstream_sema:
                 return _upstream_session.post(
-                    _LANES[lane] + path, json=body,
+                    _LANE_MODS[lane].BASE + path, json=body,
                     headers=headers, stream=True, timeout=timeout)
         except requests.RequestException as e:
             last = e
@@ -550,7 +545,7 @@ def _fetch_free(force: bool = False, quick: bool = False):
             lane = next((l for l in _LANE_ORDER if not _lane_cooling(l)),
                         _LANE_ORDER[0])
             headers = _LANE_MODS[lane].build_headers(_stable_session(""))
-            base = _LANES[lane]
+            base = _LANE_MODS[lane].BASE
             r = _upstream_session.get(base + "/models",
                                       headers=headers, timeout=timeout)
             if r.status_code != 200:
