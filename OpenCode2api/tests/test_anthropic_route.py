@@ -9,6 +9,10 @@
   5. 路由：流式 / 非流式 / 上游错误 / 闸门工具 / 非免费模型 / x-api-key 鉴权
 """
 import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server
 from adapters import anthropic as ab

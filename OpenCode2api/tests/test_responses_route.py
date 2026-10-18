@@ -9,6 +9,10 @@ OpenCode 上游原生支持 Responses 协议，此路由是原样透传（非 br
   4. 免费清单闸门工具注入：无工具注入四件套，有工具客户端在前
 """
 import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server
 

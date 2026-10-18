@@ -7,6 +7,10 @@
   回放结果 —— 分离"内容差异"与"传输层差异"
 """
 import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 import urllib3

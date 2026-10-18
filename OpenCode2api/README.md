@@ -80,9 +80,9 @@ OpenCode2api/
 ├── adapters/                 # 协议翻译层：⇄ Chat 双向翻译
 │   ├── anthropic.py          #   Anthropic ⇄ Chat
 │   └── responses.py          #   Responses ⇄ Chat（本仓当前未挂载，六仓同步留档）
-├── test_*.py                 # 离线路由测试（打桩 _post_upstream，不起真实服务）
-├── probe_*.py                # 门禁消融探针（历史证据，一锤子买卖脚本）
-└── docs/labs/                # 门禁定案文档
+├── tests/                    # 离线路由测试（打桩 _post_upstream，不起真实服务）
+├── probes/                   # 门禁消融探针（历史证据，一锤子买卖脚本）
+└── docs/                     # doc.html（反代自检页）+ labs/（门禁定案文档）
 ```
 
 上游改协议形状 → 改对应 `routes/*.py`；改通道门禁 → 改对应 `lanes/*.py`；
