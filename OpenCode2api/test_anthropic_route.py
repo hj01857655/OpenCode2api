@@ -66,10 +66,10 @@ def install_fake(raw=CHAT_TEXT, status=200):
     server._model_free = lambda m: True
     server._dump_save = lambda *a, **k: None
 
-    def fake_post(path, payload, seed, rid, timeout=180):
+    def fake_post(path, payload, seed, rid, timeout=180, flat=False):
         captured["path"] = path
         captured["payload"] = payload
-        return FakeUpstream(raw, status=status)
+        return FakeUpstream(raw, status=status), "zen"
 
     server._post_upstream = fake_post
 
@@ -212,8 +212,10 @@ def test_route():
     assert b"event: message_start" in r.data and b"event: message_stop" in r.data
     assert captured["path"] == "/chat/completions"
     assert captured["payload"]["stream"] is True
-    names = [t["function"]["name"] for t in captured["payload"]["tools"]]
-    assert {"bash", "glob", "grep", "read"} <= set(names), names
+    # 闸门工具注入已下沉 lane：断言 lane_zen 对该 payload 的准备结果
+    zen_body = server.lane_zen.prepare_body(captured["payload"])
+    names = [t["function"]["name"] for t in zen_body["tools"]]
+    assert "read" in names, names
 
     # 非流式文本
     install_fake(CHAT_TEXT)

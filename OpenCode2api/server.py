@@ -1,34 +1,28 @@
 # -*- coding: utf-8 -*-
-"""the unit2api：OpenAI 兼容反代 → the unit Zen 网关直连，只放行 free 模型。
+"""the unit2api：OpenAI 兼容反代 → OpenCode 免费层网关直连，只放行 free 模型。
 
-架构：**纯直连** 免费层网关（参考 6Kmfi6HP/opencode2api 的免费层指纹实现）。
+架构：**双通道直连**，每通道一个自包含文件（门禁规格全在各自文件里，上游改
+门禁只改对应文件，不动 server.py）：
 
-2026-10-11 上游把免费层从 /zen/v1 迁到 /inference/v1（V2 门禁下沉到私有
-inference 服务，旧指纹一律 403 FreeTierError）。门禁规格以本仓库
-docs/labs/2026-10-15-inference-v2-gate-ablation.md 消融定案为准
-（与 Go 版 10-13 报告有 5 处出入，以本次实测为准）：
-  1) session id 前 12 位 hex 必须是降序编码 ~(ts_ms<<12+k) 低 48 位
-     （对齐上游 packages/schema/src/identifier.ts）；纯随机/升序即 403；
-     counter k ∈ [1,63]（64 即拒）；时效容忍 ≥8 天；同会话值需稳定
-     （prompt 缓存亲和）
-  2) x-opencode-session-id（v2.0.29 新头）必发，且 session 族 4 头中
-     至少再带 1 个（同值或异值均可；单发 1 头 / 缺新头均 403）
-  3) x-opencode-request 头不得出现（存在本身触发 403）
-  4) tools 必须含 bash+read（chat 线最少集，顺序无关；缺 read 即 403），
-     parameters 为真实 schema（含非空 properties；description 随意）；
-     stream:true 必需；stream_options 非必需
-  UA 必须形如 opencode/<ver>：second 段为 latest 或 ≥2.0.0 的 semver
-  （1.0.0→426、非法段→403）；x-opencode-project / JSON 键序 / 连接方式
-  实测不参与校验；免费面鉴权 Authorization: Bearer public（真实 sk- key
-  打 GET /models 反 401）。
+  lane_zen.py       legacy /zen/v1 —— v1.3.7 形状，仅需一个 read 工具（优先）
+  lane_inference.py /inference/v1 —— 2.x 指纹，bash+read 最少集（回落）
+
+server.py 只留公共设施：session 指纹（两通道同源校验，共用缓存）、dumps、
+模型清单、三协议路由、通道选择与冷却调度。
+
+通道顺序用 `UPSTREAM_LANES` 配置（逗号分隔，默认 `zen,inference`）：
+  UPSTREAM_LANES=zen,inference   双通道（默认，zen 优先）
+  UPSTREAM_LANES=inference       只走 inference（旧行为）
+  UPSTREAM_LANES=zen             只走 zen
+
+风控响应分类：403 FreeTierError → 该通道冷却 600s 后跳过；429 限流 → 短冷却
+60s 并原样透传；全部通道不可用 → 本地 503 快速失败。
 
 只落请求/响应 body 原文，绝不落 header（Authorization 是明文凭证）。
 """
-import hashlib
 import json
 import logging
 import os
-import platform
 import random
 import string
 import threading
@@ -41,28 +35,28 @@ from dotenv import load_dotenv
 from flask import Flask, Response, g, jsonify, request
 
 import anthropic_bridge
+import lane_inference
+import lane_zen
 
 load_dotenv()
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-API_BASE = os.environ.get("ZEN_BASE", "").strip() or ("https://" + "opencode" + ".ai" + "/inference/v1")
-# UA 是门禁校验项（T/U 系列定案）：须 opencode/<ver≥2.0.0>（或 latest 通道）
-# ——低于下限 426、非法段 403。G 系列早期"不查 UA"系只测 opencode 系变体所致
-OC_UA = "opencode/latest/2.0.29/cli"
-# 双通道（2026-10-18 采纳参考项目 jasonxu114514/opencode2api 的 076451f/2319941）：
-# /inference 风控变严后，legacy /zen/v1 通道仍活着，门禁宽得多——探针实测只要求
-# 恰好一个名为 read 的工具（bash/shell/edit/glob/grep 单独发或无 read 反而 403），
-# UA/project 形状走 v1.3.7（OpenCode 1.18.x）。策略：zen 优先、inference 回落。
-# 注意 env 名用 LEGACY_ZEN_BASE：.env 里残留的 ZEN_BASE 历史上是主通道（API_BASE）
-# 的覆盖名，沿用会撞名——01:18 实测曾把 zen 通道错误指到 /inference/v1。
-LEGACY_ZEN_BASE = (os.environ.get("LEGACY_ZEN_BASE", "").strip()
-                   or ("https://" + "opencode" + ".ai" + "/zen/v1"))
-ZEN_UA_FMT = "opencode/1.18.31 ({os} {arch}; {rt})"   # v1.3.7 UA 形状，版本取参考项目 1.18.31
 API_KEY = os.environ.get("API_KEY", "").strip()
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = int(os.getenv("PORT", "8390"))
+
+# ── 通道注册表（每通道一个自包含文件，门禁规格全在各自 lane 文件里）────────────
+_LANE_MODS = {"zen": lane_zen, "inference": lane_inference}
+# 通道顺序：UPSTREAM_LANES 逗号分隔（默认 zen 优先、inference 回落）。
+_LANE_ORDER = [s.strip() for s in
+               os.environ.get("UPSTREAM_LANES", "zen,inference").split(",")
+               if s.strip() in _LANE_MODS] or ["zen", "inference"]
+# 兼容别名：旧引用点（_fetch_free / 探针）仍可用
+API_BASE = lane_inference.BASE
+LEGACY_ZEN_BASE = lane_zen.BASE
+_LANES = {name: mod.BASE for name, mod in _LANE_MODS.items()}
 # 上游已废弃模型（实测 410 ModelDeprecated）：剔除，避免误调必失败
-DEPRECATED = {"exo-free"}
+DEPRECATED = lane_inference.DEPRECATED
 
 # ── 日志（与 cline2api / qoder2api 同一标准）──────────────────────────────────
 LOG_FILE = os.path.join(BASE, "request.log")
@@ -130,8 +124,8 @@ def _dump_save(rid, kind, data):
 # 免费层是匿名面：V2 门禁只校验指纹，不认 key。2026-10-15 实测（/inference/v1，同一份
 # 指纹与 body）：`Bearer public` 四次全 200，换成本地存的那把 sk- key 四次全 401
 # `Upstream request failed: Invalid credential`。所以不再读凭证文件——
-# `credentials.json` 留着备用，但不参与任何上游请求。要改用真 key 时设 UPSTREAM_AUTH。
-UPSTREAM_AUTH = os.environ.get("UPSTREAM_AUTH", "").strip() or "Bearer public"
+# `credentials.json` 留着备用，但不参与任何上游请求。要改用真 key 时设 UPSTREAM_AUTH
+# （鉴权常量本身定义在 lane_*.py 的 AUTH，下方有兼容别名）。
 
 
 # ── 闸门指纹 ──────────────────────────────────────────────────────────────────
@@ -250,120 +244,23 @@ def _stable_session(seed: str) -> str:
     return _oc_session_for(seed)
 
 
-GATE_TOOLS_MORE = [
-    {"type": "function",
-     "function": {"name": "glob", "description": "Find files by pattern",
-                  "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}}}},
-    {"type": "function",
-     "function": {"name": "grep", "description": "Search file contents",
-                  "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}}}},
-]
-GATE_TOOLS = [
-    {"type": "function",
-     "function": {"name": "bash", "description": "Execute a shell command",
-                  "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}}},
-    {"type": "function",
-     "function": {"name": "read", "description": "Read a file",
-                  "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
-    *GATE_TOOLS_MORE,
-]
+# 闸门工具规格已下沉到各 lane 文件（每通道自包含）：
+#   lane_zen.GATE.../prepare_body   —— zen 通道仅需一个 read
+#   lane_inference.GATE_TOOLS       —— bash+read 最少集 + glob/grep
+# 此处仅保留兼容别名（探针/旧脚本引用），路由不再使用。
+GATE_TOOLS = lane_inference.GATE_TOOLS
+GATE_TOOLS_FLAT = lane_inference.GATE_TOOLS_FLAT
+UPSTREAM_AUTH = lane_inference.AUTH
 
 
 def _upstream_headers(seed: str = "") -> dict:
-    """V2 指纹全量头（/inference/v1 路径，2026-10-15 T/U 系列定案）：
-    Authorization 固定 `Bearer public`（免费层匿名面，见 UPSTREAM_AUTH）；
-    x-opencode-session-id 必发 + 四头全发同值（门禁：新头必需、族内 ≥2 头，
-    值可不同，全发最稳）；UA 是校验项（见 OC_UA 注）；project 不参与
-    校验（保留 global 仅为形似客户端）；x-opencode-request 禁发
-    （存在本身触发 403）。"""
-    ses = _stable_session(seed)
-    return {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": UPSTREAM_AUTH,
-        "User-Agent": OC_UA,
-        "x-opencode-client": "cli",
-        "x-opencode-project": "global",
-        "x-opencode-session": ses,
-        "x-session-id": ses,
-        "x-session-affinity": ses,
-        "x-opencode-session-id": ses,
-    }
+    """inference 通道指纹头（薄代理，规格见 lane_inference.py）。"""
+    return lane_inference.build_headers(_stable_session(seed))
 
 
 def _zen_headers(seed: str = "") -> dict:
-    """legacy /zen/v1 通道指纹（v1.3.7 形状，对齐参考项目 2319941）：
-    UA 是 1.18.x 旧形 `opencode/1.18.31 (<os> <arch>; <rt>)`；必发
-    x-opencode-request（/inference 禁发，zen 反而要发）；project 用
-    `prj_`+24hex 形状；鉴权同样 `Bearer public`（anonymousZenKey）；
-    session 用同一套降序 TypeID（两通道同源校验，共用缓存保 prompt 亲和）。"""
-    ses = _stable_session(seed)
-    prj = "prj_" + hashlib.sha256(b"opencode-project\x00zen").hexdigest()[:24]
-    ua = ZEN_UA_FMT.format(os=platform.system().lower() or "windows",
-                           arch=platform.machine().lower() or "amd64",
-                           rt="bun/1.3.14")
-    return {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": UPSTREAM_AUTH,
-        "User-Agent": ua,
-        "x-opencode-client": "cli",
-        "x-opencode-project": prj,
-        "x-opencode-session": ses,
-        "x-session-id": ses,
-        "x-session-affinity": ses,
-        "x-opencode-request": _ident("req"),
-    }
-
-
-# legacy /zen/v1 门禁只需一个名为 read 的工具（参考项目 a9470df 探针定案：
-# [read] 单独发即过；bash/shell/edit/glob/grep 单独发或无 read 均 403；
-# description/schema 均不校验）。客户端已带 read（大小写/别名匹配）就不再注入。
-_ZEN_READ_TOOL = {"type": "function",
-                  "function": {"name": "read", "description": "Read a file",
-                               "parameters": {"type": "object",
-                                              "properties": {"path": {"type": "string"}}}}}
-
-
-_ZEN_READ_ALIASES = {"readfile", "fileread", "readfiles", "readtext",
-                     "readtextfile", "readcontent", "viewfile"}
-
-
-def _zen_read_ok(names):
-    for n in names:
-        low = str(n or "").lower().replace("_", "").replace("-", "").replace(".", "")
-        if low == "read" or low in _ZEN_READ_ALIASES:
-            return True
-    return False
-
-
-def _zenize_tools_chat(payload):
-    """chat 线 body 的 zen 化：确保恰好有 read 可声明（门禁唯一硬要求）。"""
-    tools = payload.get("tools")
-    if not isinstance(tools, list) or not tools:
-        payload["tools"] = [_ZEN_READ_TOOL]
-        return
-    names = [(t.get("function") or {}).get("name") for t in tools
-             if isinstance(t, dict)]
-    if not _zen_read_ok(names):
-        payload["tools"] = list(tools) + [_ZEN_READ_TOOL]
-
-
-def _zenize_tools_flat(payload):
-    """responses 线（扁平 tool 格式）的 zen 化。"""
-    tools = payload.get("tools")
-    if not isinstance(tools, list) or not tools:
-        payload["tools"] = [{"type": "function", "name": "read",
-                             "description": "Read a file",
-                             "parameters": {"type": "object",
-                                            "properties": {"path": {"type": "string"}}}}]
-        return
-    names = [t.get("name") for t in tools if isinstance(t, dict)]
-    if not _zen_read_ok(names):
-        payload["tools"] = list(tools) + [{"type": "function", "name": "read",
-                                           "description": "Read a file",
-                                           "parameters": {"type": "object",
-                                                          "properties": {"path": {"type": "string"}}}}]
+    """zen 通道指纹头（薄代理，规格见 lane_zen.py）。"""
+    return lane_zen.build_headers(_stable_session(seed))
 
 
 # ── 上游转发：共享连接池 + 连接级单次重试 ────────────────────────────────────
@@ -447,15 +344,21 @@ def _gate_mark(lane, rid, why, seconds=None):
                    rid, lane, why, seconds or _COOLDOWN_S)
 
 
-def _post_lane(lane, path, payload, seed, rid, timeout):
-    """单通道一次发送（含连接级重试）；返回 Response 或抛异常。"""
-    headers = _zen_headers(seed) if lane == "zen" else _upstream_headers(seed)
+def _post_lane(lane, path, payload, seed, rid, timeout, flat=False):
+    """单通道一次发送（含连接级重试）；返回 Response 或抛异常。
+
+    body 由该通道的 lane 模块自行 prepare（每通道自包含的门禁规格），
+    headers 的 session 由 server 统一生成后传入（两通道同源校验）。
+    """
+    mod = _LANE_MODS[lane]
+    body = mod.prepare_body(payload, flat=flat)
+    headers = mod.build_headers(_stable_session(seed))
     last = None
     for attempt in range(_UPSTREAM_RETRY + 1):
         try:
             with _upstream_sema:
                 return _upstream_session.post(
-                    _LANES[lane] + path, json=payload,
+                    _LANES[lane] + path, json=body,
                     headers=headers, stream=True, timeout=timeout)
         except requests.RequestException as e:
             last = e
@@ -472,28 +375,25 @@ def _post_lane(lane, path, payload, seed, rid, timeout):
 
 
 def _post_upstream(path: str, payload: dict, seed: str, rid: str,
-                   zenize=None, timeout: int = 180):
-    """双通道直连：legacy /zen/v1 优先，/inference/v1 回落（2026-10-18 起）。
+                   timeout: int = 180, flat=False):
+    """多通道直连：按 UPSTREAM_LANES 顺序逐通道尝试（默认 zen 优先、inference
+    回落；单通道配置即旧行为）。
 
-    返回 (Response, lane)。zen 化 body 只作用于 zen 通道（zenize 改的是副本），
-    inference 保持 2026-10-15 定案的 V2 形状。403 FreeTierError 触发该通道冷却
-    并继续尝试另一通道；两通道都不可用（都在冷却 / 都 403 / 都断连）时分别以
+    返回 (Response, lane)。每通道的 body 准备由各自 lane 模块完成（自包含
+    门禁规格），server 不掺和通道细节。403 FreeTierError 触发该通道冷却并
+    继续下一通道；所有通道都不可用（都在冷却 / 都 403 / 都断连）时分别以
     503 合成响应、最后一个真实 403、或异常交付给调用方的既有错误分支。
     """
-    zen_body = dict(payload)
-    if zenize is not None:
-        zenize(zen_body)
     resp403 = None
     resp403_lane = ""
     net_err = None
-    for lane in ("zen", "inference"):
+    for lane in _LANE_ORDER:
         left = _lane_cooling(lane)
         if left:
             logger.info("[%s] 通道 %s 冷却中（剩 %ds），跳过", rid, lane, left)
             continue
         try:
-            r = _post_lane(lane, path, zen_body if lane == "zen" else payload,
-                           seed, rid, timeout)
+            r = _post_lane(lane, path, payload, seed, rid, timeout, flat=flat)
         except requests.RequestException as e:
             net_err = e
             logger.error("[%s] 通道 %s 连接失败: %s: %s",
@@ -521,15 +421,16 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
                            rid, lane, r.status_code, r.text[:400])
             _dump_save(rid, "resp", r.text)
             return r, lane
-        if lane != "zen":
-            logger.warning("[%s] zen 不可用，回落通道 %s 成功", rid, lane)
+        if lane != _LANE_ORDER[0]:
+            logger.warning("[%s] 首选通道不可用，回落通道 %s 成功",
+                           rid, lane)
         return r, lane
     if resp403 is not None:
         return resp403, resp403_lane
     if net_err is not None:
         raise net_err
-    left = max(_lane_cooling("zen"), _lane_cooling("inference"))
-    logger.warning("[%s] 双通道均在风控冷却（剩 %ds），本地快速失败",
+    left = max(_lane_cooling(l) for l in _LANE_ORDER)
+    logger.warning("[%s] 全部通道均在风控冷却（剩 %ds），本地快速失败",
                    rid, int(left))
     return _ErrResp(503, json.dumps({
         "error": {"message": "upstream free tier flagged (403), cooldown %ds left, retry later" % int(left),
@@ -612,10 +513,10 @@ def _fetch_free(force: bool = False, quick: bool = False):
     last_err = None
     for attempt in range(attempts):
         try:
-            # 模型清单与推理同为匿名面；zen 优先（清单端点在两通道都在），
-            # zen 冷却时直接用 inference 的 V2 指纹头拉。
-            lane = "zen" if not _lane_cooling("zen") else "inference"
-            headers = _zen_headers() if lane == "zen" else _upstream_headers()
+            # 模型清单与推理同为匿名面；按通道顺序取首个未冷却通道拉取
+            lane = next((l for l in _LANE_ORDER if not _lane_cooling(l)),
+                        _LANE_ORDER[0])
+            headers = _LANE_MODS[lane].build_headers(_stable_session(""))
             base = _LANES[lane]
             r = _upstream_session.get(base + "/models",
                                       headers=headers, timeout=timeout)
@@ -724,25 +625,15 @@ def chat():
     payload["model"] = model
     payload["stream"] = True            # 上游只收流式；非流式本地聚合
     payload["stream_options"] = {"include_usage": True}
-    # 过闸门必需 tools 声明，但不能整包替换客户端的工具：否则模型只剩 bash/read/glob/grep
-    # 四个假工具可调，真实工具（read_file/edit_file 等）全丢，表现就是"发一下就停了"。
-    # 做法与 responses 线一致：客户端工具在前，缺失的过闸门工具补在后面。
-    tools = p.get("tools")
-    if not isinstance(tools, list) or not tools:
-        payload["tools"] = GATE_TOOLS
-    else:
-        names = {(t.get("function") or {}).get("name")
-                 for t in tools if isinstance(t, dict)}
-        payload["tools"] = list(tools) + [
-            t for t in GATE_TOOLS if t["function"]["name"] not in names]
+    # 闸门工具注入已下沉到各 lane 文件（lane_*.prepare_body，随通道而异）：
+    # 路由只管协议透传，不再掺和通道门禁细节。
     want_stream = bool(p.get("stream"))
 
-    # ── 通道一：直连 zen 网关（快，首帧 1~2s）；inference 回落 ─────────────────
+    # ── 上游：按 UPSTREAM_LANES 顺序逐通道尝试（默认 zen 优先、inference 回落）──
     # 连接被切断时补试一次，理由与边界见 _post_lane。
     try:
         upstream, lane = _post_upstream("/chat/completions", payload,
-                                        _session_seed(p), g.rid,
-                                        zenize=_zenize_tools_chat)
+                                        _session_seed(p), g.rid)
     except requests.RequestException as e:
         # 必须在这里返回：upstream 不存在，继续往下走 upstream.status_code
         # 会抛 AttributeError，把网络故障伪装成 500。
@@ -814,17 +705,8 @@ def chat():
 
 # ── /v1/responses 透传（muse-spark-* 等仅支持 Responses 协议的模型）──────────
 # 与 chat 同一套免费层指纹；差别：上游路径 /responses、工具为扁平格式
-# （无 "function" 包裹层）、会话种子兼容 input 字段。协议本身不转换，原样透传。
-GATE_TOOLS_FLAT = [
-    {"type": "function", "name": "bash", "description": "Execute a shell command",
-     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}},
-    {"type": "function", "name": "glob", "description": "Find files by pattern",
-     "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}}},
-    {"type": "function", "name": "grep", "description": "Search file contents",
-     "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}}},
-    {"type": "function", "name": "read", "description": "Read a file",
-     "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}},
-]
+# （无 "function" 包裹层，闸门工具见 lane_inference.GATE_TOOLS_FLAT）、
+# 会话种子兼容 input 字段。协议本身不转换，原样透传。
 
 
 @app.route("/v1/responses", methods=["POST"])
@@ -844,19 +726,12 @@ def responses_route():
         payload["stream_options"]["include_usage"] = True
     else:
         payload["stream_options"] = {"include_usage": True}
-    # 过闸门必需：客户端没带工具时注入四件套（已有则保留客户端的在前）
-    tools = payload.get("tools")
-    if not isinstance(tools, list) or not tools:
-        payload["tools"] = GATE_TOOLS_FLAT
-    else:
-        names = {t.get("name") for t in tools if isinstance(t, dict)}
-        payload["tools"] = list(tools) + [t for t in GATE_TOOLS_FLAT
-                                          if t["name"] not in names]
+    # 闸门工具注入已下沉到各 lane 文件（flat=True 走扁平工具格式）
     want_stream = bool(p.get("stream"))
 
     try:
         upstream, lane = _post_upstream("/responses", payload, _session_seed(p), g.rid,
-                                        zenize=_zenize_tools_flat)
+                                        flat=True)
     except requests.RequestException as e:
         logger.error("[%s] 上游连接失败: %s: %s", g.rid, type(e).__name__, e)
         return jsonify(error={"message": str(e), "type": "upstream_error"}), 502
@@ -937,21 +812,12 @@ def messages_route():
     chat_payload["model"] = model
     chat_payload["stream"] = True            # 上游只收流式
     chat_payload["stream_options"] = {"include_usage": True}
-    # 闸门工具：与 chat 线同一做法（客户端工具在前，缺失的小写 stub 补后）
-    tools = chat_payload.get("tools")
-    if not isinstance(tools, list) or not tools:
-        chat_payload["tools"] = GATE_TOOLS
-    else:
-        names = {(t.get("function") or {}).get("name")
-                 for t in tools if isinstance(t, dict)}
-        chat_payload["tools"] = list(tools) + [
-            t for t in GATE_TOOLS if t["function"]["name"] not in names]
+    # 闸门工具注入已下沉到各 lane 文件
     want_stream = bool(p.get("stream"))
 
     try:
         upstream, lane = _post_upstream("/chat/completions", chat_payload,
-                                        _session_seed(chat_payload), g.rid,
-                                        zenize=_zenize_tools_chat)
+                                        _session_seed(chat_payload), g.rid)
     except requests.RequestException as e:
         logger.error("[%s] messages 上游连接失败: %s: %s", g.rid, type(e).__name__, e)
         return jsonify(anthropic_bridge.error_body("api_error", str(e))), 502

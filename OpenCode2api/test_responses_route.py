@@ -61,13 +61,14 @@ def install_fake(mode="ok"):
     server._model_free = lambda m: True
     server._dump_save = lambda *a, **k: None
 
-    def fake_post(path, payload, seed, rid, timeout=180):
+    def fake_post(path, payload, seed, rid, timeout=180, flat=False):
         captured["path"] = path
         captured["payload"] = payload
+        captured["flat"] = flat
         if mode == "error":
             return FakeUpstream(b'{"message":"upstream says no"}', status=400,
-                                content_type="application/json")
-        return FakeUpstream(RESPONSES_SSE)
+                                content_type="application/json"), "zen"
+        return FakeUpstream(RESPONSES_SSE), "zen"
 
     server._post_upstream = fake_post
 
@@ -84,16 +85,19 @@ def main():
     assert r.data == RESPONSES_SSE, "流式必须字节级原样透传"
     assert captured["path"] == "/responses"
     assert captured["payload"]["stream"] is True
-    # 客户端没带工具 → 注入免费清单四件套
-    names = [t["name"] for t in captured["payload"]["tools"]]
+    assert captured["flat"] is True
+    # 闸门工具注入已下沉 lane（flat=True 扁平格式）：断言 lane_inference 的准备结果
+    inf_body = server.lane_inference.prepare_body(captured["payload"], flat=True)
+    names = [t["name"] for t in inf_body["tools"]]
     assert names[:4] == ["bash", "glob", "grep", "read"], names
 
-    # 客户端带了自己的工具 → 客户端在前、补齐缺失件
+    # 客户端带了自己的工具 → 客户端在前、补齐缺失件（同走 lane 断言）
     r = client.post("/v1/responses",
                     json=dict(req, tools=[{"type": "function", "name": "my_tool",
                                            "description": "d",
                                            "parameters": {"type": "object"}}]))
-    names = [t["name"] for t in captured["payload"]["tools"]]
+    inf_body = server.lane_inference.prepare_body(captured["payload"], flat=True)
+    names = [t["name"] for t in inf_body["tools"]]
     assert names[0] == "my_tool" and set(names) == {"my_tool", "bash", "glob", "grep", "read"}, names
 
     # ---------- 2) 非流式：聚合终止帧 ----------
