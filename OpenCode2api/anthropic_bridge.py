@@ -459,10 +459,12 @@ def chat_sse_to_anthropic(stream, model):
     for idx in range(len(blocks)):
         yield _ant_frame("content_block_stop", {"index": idx})
 
-    out_tokens = int((usage or {}).get("completion_tokens") or 0) if usage else 0
+    # 收尾补全 usage：上游 chat 的 prompt_tokens 必须透出为 input_tokens——
+    # 否则客户端（Claude Code 等）恒见 input_tokens=0，上下文占用/成本统计
+    # 与自动压缩判据全部失真。cache_* 上游 chat 协议本就无对应项，保持 0。
     yield _ant_frame("message_delta", {
         "delta": {"stop_reason": _stop_reason(finish), "stop_sequence": None},
-        "usage": {"output_tokens": out_tokens}})
+        "usage": _anthropic_usage(usage)})
     yield _ant_frame("message_stop", {})
 
 

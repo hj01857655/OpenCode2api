@@ -386,6 +386,8 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
     """
     resp403 = None
     resp403_lane = ""
+    resp404 = None
+    resp404_lane = ""
     net_err = None
     for lane in _LANE_ORDER:
         left = _lane_cooling(lane)
@@ -399,13 +401,20 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
             logger.error("[%s] 通道 %s 连接失败: %s: %s",
                          rid, lane, type(e).__name__, str(e)[:160])
             continue
-        if r.status_code == 403:
+        if r.status_code in (403, 404):
             body = r.text[:400]
-            logger.warning("[%s] 通道 %s 上游 403: %s", rid, lane, body)
+            logger.warning("[%s] 通道 %s 上游 %s: %s", rid, lane, r.status_code, body)
             _dump_save(rid, "resp", r.text)
-            if "freetiererror" in body.lower() or "free tier" in body.lower():
+            if r.status_code == 403 and ("freetiererror" in body.lower()
+                                         or "free tier" in body.lower()):
                 _gate_mark(lane, rid, "FreeTierError")
                 resp403, resp403_lane = r, lane
+                continue
+            if r.status_code == 404:
+                # 该通道没有这个端点（如 zen 通道可能只有 /chat/completions，
+                # 没有 /responses）→ 不冷却，回落下一通道；全部 404 时交付
+                # 最后一个真实 404 让人看见。
+                resp404, resp404_lane = r, lane
                 continue
             # 非 FreeTier 的 403（形状类问题）：不冷却，原样交付让人看见
             return r, lane
@@ -427,6 +436,8 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
         return r, lane
     if resp403 is not None:
         return resp403, resp403_lane
+    if resp404 is not None:
+        return resp404, resp404_lane
     if net_err is not None:
         raise net_err
     left = max(_lane_cooling(l) for l in _LANE_ORDER)
@@ -672,7 +683,10 @@ def chat():
         return Response(gen(), status=200, content_type="text/event-stream")
 
     # 非流式：本地聚合 SSE
-    content, finish = [], None
+    content, reasoning = [], []
+    finish = None
+    tool_calls = {}          # index -> {id,name,arguments}（流式按 index 分片）
+    usage = None
     for raw in upstream.iter_lines(decode_unicode=False):
         # 上游 SSE 不带 charset，requests 的 unicode 模式会按 Latin-1 猜，
         # 中文全毁；必须字节级收，显式 UTF-8 解码。
@@ -685,18 +699,42 @@ def chat():
             delta = json.loads(line[5:].strip())
         except Exception:
             continue
+        if isinstance(delta.get("usage"), dict):
+            usage = delta["usage"]
         for ch in (delta.get("choices") or []):
             d = ch.get("delta") or {}
             if d.get("content"):
                 content.append(d["content"])
+            if d.get("reasoning_content"):
+                reasoning.append(d["reasoning_content"])
+            for tc in d.get("tool_calls") or []:
+                slot = tool_calls.setdefault(tc.get("index", 0),
+                                             {"id": "", "name": "", "arguments": ""})
+                fn = tc.get("function") or {}
+                slot["id"] = tc.get("id") or slot["id"]
+                slot["name"] += fn.get("name") or ""
+                slot["arguments"] += fn.get("arguments") or ""
             if ch.get("finish_reason"):
                 finish = ch["finish_reason"]
     text = "".join(content)
+    message = {"role": "assistant", "content": text}
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+    if tool_calls:
+        message["tool_calls"] = [
+            {"id": v["id"] or "call_%d" % i, "type": "function",
+             "function": {"name": v["name"], "arguments": v["arguments"]}}
+            for i, v in sorted(tool_calls.items())]
+        if not text:
+            message["content"] = None
+        if finish == "stop":
+            finish = "tool_calls"
     out = {"id": "chatcmpl-" + uuid.uuid4().hex[:24], "object": "chat.completion",
            "created": int(time.time()), "model": model,
-           "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+           "choices": [{"index": 0, "message": message,
                         "finish_reason": finish or "stop"}],
-           "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+           "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0,
+                              "total_tokens": 0}}
     body = json.dumps(out, ensure_ascii=False)
     logger.info("[%s] done: status=200 %dB %.1fs", g.rid, len(body), time.time() - g.t0)
     _dump_save(g.rid, "resp", body)
