@@ -76,7 +76,7 @@ OpenCode2api/
 ├── routes/                   # 协议路由层：每协议一个文件
 │   ├── chat.py               #   /v1/chat/completions（流式透传 + 非流式聚合）
 │   ├── responses.py          #   /v1/responses（muse-spark 原生字节透传）
-│   └── messages.py           #   /v1/messages（经 adapters/anthropic.py 翻译）
+│   └── anthropic.py          #   /v1/messages（经 adapters/anthropic.py 翻译）
 ├── adapters/                 # 协议翻译层：⇄ Chat 双向翻译
 │   ├── anthropic.py          #   Anthropic ⇄ Chat
 │   └── responses.py          #   Responses ⇄ Chat（本仓当前未挂载，六仓同步留档）

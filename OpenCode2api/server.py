@@ -11,7 +11,7 @@
 协议层（routes/ 每协议一个文件；adapters/ 只放翻译桥）：
   routes/chat.py                 /v1/chat/completions
   routes/responses.py            /v1/responses
-  routes/messages.py             /v1/messages（经 adapters/anthropic.py 翻译）
+  routes/anthropic.py            /v1/messages（经 adapters/anthropic.py 翻译）
 
 server.py 只留公共设施：session 指纹（两通道同源校验，共用缓存）、dumps、
 模型清单、通道选择与冷却调度、协议层挂载。
@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, g, jsonify, request
 
 from adapters import anthropic
-from routes import chat, messages, responses
+from routes import anthropic, chat, responses
 from lanes import inference, zen
 
 # 兼容别名：旧探针/测试引用的旧模块名（lane_zen / lane_inference / anthropic_bridge）
@@ -641,7 +641,7 @@ import sys as _sys
 _core = _sys.modules[__name__]
 chat.register(app, _core)
 responses.register(app, _core)
-messages.register(app, _core)
+anthropic.register(app, _core)
 
 
 if __name__ == "__main__":

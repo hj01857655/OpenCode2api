@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""routes/messages.py — Anthropic Messages 协议路由（/v1/messages）。
+"""routes/anthropic.py — Anthropic Messages 协议路由（/v1/messages）。
 
 上游 /messages 是付费凭证面（免费模型 403、付费 401），免费层走不了直通；
 本层经 adapters/anthropic.py 在本地把 Anthropic ⇄ Chat 双向翻译，
