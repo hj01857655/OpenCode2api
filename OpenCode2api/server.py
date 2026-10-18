@@ -24,9 +24,11 @@ docs/labs/2026-10-15-inference-v2-gate-ablation.md 消融定案为准
 
 只落请求/响应 body 原文，绝不落 header（Authorization 是明文凭证）。
 """
+import hashlib
 import json
 import logging
 import os
+import platform
 import random
 import string
 import threading
@@ -47,6 +49,15 @@ API_BASE = os.environ.get("ZEN_BASE", "").strip() or ("https://" + "opencode" + 
 # UA 是门禁校验项（T/U 系列定案）：须 opencode/<ver≥2.0.0>（或 latest 通道）
 # ——低于下限 426、非法段 403。G 系列早期"不查 UA"系只测 opencode 系变体所致
 OC_UA = "opencode/latest/2.0.29/cli"
+# 双通道（2026-10-18 采纳参考项目 jasonxu114514/opencode2api 的 076451f/2319941）：
+# /inference 风控变严后，legacy /zen/v1 通道仍活着，门禁宽得多——探针实测只要求
+# 恰好一个名为 read 的工具（bash/shell/edit/glob/grep 单独发或无 read 反而 403），
+# UA/project 形状走 v1.3.7（OpenCode 1.18.x）。策略：zen 优先、inference 回落。
+# 注意 env 名用 LEGACY_ZEN_BASE：.env 里残留的 ZEN_BASE 历史上是主通道（API_BASE）
+# 的覆盖名，沿用会撞名——01:18 实测曾把 zen 通道错误指到 /inference/v1。
+LEGACY_ZEN_BASE = (os.environ.get("LEGACY_ZEN_BASE", "").strip()
+                   or ("https://" + "opencode" + ".ai" + "/zen/v1"))
+ZEN_UA_FMT = "opencode/1.18.31 ({os} {arch}; {rt})"   # v1.3.7 UA 形状，版本取参考项目 1.18.31
 API_KEY = os.environ.get("API_KEY", "").strip()
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = int(os.getenv("PORT", "8390"))
@@ -280,6 +291,81 @@ def _upstream_headers(seed: str = "") -> dict:
     }
 
 
+def _zen_headers(seed: str = "") -> dict:
+    """legacy /zen/v1 通道指纹（v1.3.7 形状，对齐参考项目 2319941）：
+    UA 是 1.18.x 旧形 `opencode/1.18.31 (<os> <arch>; <rt>)`；必发
+    x-opencode-request（/inference 禁发，zen 反而要发）；project 用
+    `prj_`+24hex 形状；鉴权同样 `Bearer public`（anonymousZenKey）；
+    session 用同一套降序 TypeID（两通道同源校验，共用缓存保 prompt 亲和）。"""
+    ses = _stable_session(seed)
+    prj = "prj_" + hashlib.sha256(b"opencode-project\x00zen").hexdigest()[:24]
+    ua = ZEN_UA_FMT.format(os=platform.system().lower() or "windows",
+                           arch=platform.machine().lower() or "amd64",
+                           rt="bun/1.3.14")
+    return {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": UPSTREAM_AUTH,
+        "User-Agent": ua,
+        "x-opencode-client": "cli",
+        "x-opencode-project": prj,
+        "x-opencode-session": ses,
+        "x-session-id": ses,
+        "x-session-affinity": ses,
+        "x-opencode-request": _ident("req"),
+    }
+
+
+# legacy /zen/v1 门禁只需一个名为 read 的工具（参考项目 a9470df 探针定案：
+# [read] 单独发即过；bash/shell/edit/glob/grep 单独发或无 read 均 403；
+# description/schema 均不校验）。客户端已带 read（大小写/别名匹配）就不再注入。
+_ZEN_READ_TOOL = {"type": "function",
+                  "function": {"name": "read", "description": "Read a file",
+                               "parameters": {"type": "object",
+                                              "properties": {"path": {"type": "string"}}}}}
+
+
+_ZEN_READ_ALIASES = {"readfile", "fileread", "readfiles", "readtext",
+                     "readtextfile", "readcontent", "viewfile"}
+
+
+def _zen_read_ok(names):
+    for n in names:
+        low = str(n or "").lower().replace("_", "").replace("-", "").replace(".", "")
+        if low == "read" or low in _ZEN_READ_ALIASES:
+            return True
+    return False
+
+
+def _zenize_tools_chat(payload):
+    """chat 线 body 的 zen 化：确保恰好有 read 可声明（门禁唯一硬要求）。"""
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not tools:
+        payload["tools"] = [_ZEN_READ_TOOL]
+        return
+    names = [(t.get("function") or {}).get("name") for t in tools
+             if isinstance(t, dict)]
+    if not _zen_read_ok(names):
+        payload["tools"] = list(tools) + [_ZEN_READ_TOOL]
+
+
+def _zenize_tools_flat(payload):
+    """responses 线（扁平 tool 格式）的 zen 化。"""
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not tools:
+        payload["tools"] = [{"type": "function", "name": "read",
+                             "description": "Read a file",
+                             "parameters": {"type": "object",
+                                            "properties": {"path": {"type": "string"}}}}]
+        return
+    names = [t.get("name") for t in tools if isinstance(t, dict)]
+    if not _zen_read_ok(names):
+        payload["tools"] = list(tools) + [{"type": "function", "name": "read",
+                                           "description": "Read a file",
+                                           "parameters": {"type": "object",
+                                                          "properties": {"path": {"type": "string"}}}}]
+
+
 # ── 上游转发：共享连接池 + 连接级单次重试 ────────────────────────────────────
 # 2026-10-13 实测：chat 线 210 次失败全是 `SSLEOFError(UNEXPECTED_EOF_WHILE_READING)`，
 # 而**同期 24 次纯 TLS 握手、以及串行/并发 GET+POST 全部 0 失败**。结论：
@@ -295,6 +381,10 @@ def _upstream_headers(seed: str = "") -> dict:
 #      我们的 502 重发 —— 服务端补这一次，总请求数反而比放任客户端重试更少。
 _UPSTREAM_POOL = int(os.getenv("UPSTREAM_POOL", "32"))
 _UPSTREAM_RETRY = int(os.getenv("UPSTREAM_RETRY", "1"))
+# 并发闸（2026-10-18 增）：01:11 那波 10 连发 ~1MB body 后即被风控标记，
+# 限流是防再犯的核心。默认 4，可用 UPSTREAM_CONCURRENCY 调。
+_UPSTREAM_CONCURRENCY = int(os.getenv("UPSTREAM_CONCURRENCY", "4"))
+_upstream_sema = threading.BoundedSemaphore(_UPSTREAM_CONCURRENCY)
 
 
 def _new_upstream_session() -> requests.Session:
@@ -322,18 +412,51 @@ def _is_retryable_upstream_error(e: Exception) -> bool:
     return isinstance(e, requests.exceptions.ConnectionError)
 
 
-def _post_upstream(path: str, payload: dict, seed: str, rid: str,
-                   timeout: int = 180):
-    """POST 上游并返回 Response（stream=True，未消费 body）。
+class _ErrResp:
+    """冷却期快速失败的本地合成响应：三个路由的 `status_code >= 400 → 原样透传`
+    错误分支只消费 status_code/text/headers，不会走到 iter_*，故只实现这三个。"""
 
-    全部尝试都失败时抛出最后一个异常，由调用方转 502。
-    """
+    def __init__(self, status, text):
+        self.status_code = status
+        self.text = text
+        self.headers = {"Content-Type": "application/json"}
+
+
+# ── 风控冷却：403 FreeTierError 后该通道静默 N 秒，不再撞上游 ─────────────────
+# 2026-10-18 实测：1MB 级并发轰一轮后上游按指纹/IP 打滥用标记，三个模型全 403
+# 秒拒，继续撞只会续期标记。按通道分别冷却（zen 被标记不影响 inference，反之亦
+# 然）；两通道都在冷却才本地 503 快速失败，把重试节奏交还客户端。
+_COOLDOWN_S = int(os.getenv("UPSTREAM_COOLDOWN", "600"))          # 403 指纹拒绝
+_COOLDOWN_429_S = int(os.getenv("UPSTREAM_COOLDOWN_429", "60"))   # 429 限流
+_gate = {"zen": 0.0, "inference": 0.0}
+_gate_lock = threading.Lock()
+_LANES = {"zen": LEGACY_ZEN_BASE, "inference": API_BASE}
+
+
+def _lane_cooling(lane):
+    """该通道剩余冷却秒数；0 = 未冷却。（返回剩余而非绝对时刻，调用方直接可读。）"""
+    with _gate_lock:
+        until = _gate[lane]
+        return int(until - time.time()) + 1 if time.time() < until else 0
+
+
+def _gate_mark(lane, rid, why, seconds=None):
+    with _gate_lock:
+        _gate[lane] = time.time() + (seconds or _COOLDOWN_S)
+    logger.warning("[%s] 通道 %s 命中 %s，冷却 %ds 内不再请求",
+                   rid, lane, why, seconds or _COOLDOWN_S)
+
+
+def _post_lane(lane, path, payload, seed, rid, timeout):
+    """单通道一次发送（含连接级重试）；返回 Response 或抛异常。"""
+    headers = _zen_headers(seed) if lane == "zen" else _upstream_headers(seed)
     last = None
     for attempt in range(_UPSTREAM_RETRY + 1):
         try:
-            return _upstream_session.post(
-                API_BASE + path, json=payload,
-                headers=_upstream_headers(seed), stream=True, timeout=timeout)
+            with _upstream_sema:
+                return _upstream_session.post(
+                    _LANES[lane] + path, json=payload,
+                    headers=headers, stream=True, timeout=timeout)
         except requests.RequestException as e:
             last = e
             if attempt >= _UPSTREAM_RETRY or not _is_retryable_upstream_error(e):
@@ -346,6 +469,71 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
                            type(e).__name__, str(e)[:120])
             time.sleep(back)
     raise last  # pragma: no cover —— 循环内必定 return 或 raise
+
+
+def _post_upstream(path: str, payload: dict, seed: str, rid: str,
+                   zenize=None, timeout: int = 180):
+    """双通道直连：legacy /zen/v1 优先，/inference/v1 回落（2026-10-18 起）。
+
+    返回 (Response, lane)。zen 化 body 只作用于 zen 通道（zenize 改的是副本），
+    inference 保持 2026-10-15 定案的 V2 形状。403 FreeTierError 触发该通道冷却
+    并继续尝试另一通道；两通道都不可用（都在冷却 / 都 403 / 都断连）时分别以
+    503 合成响应、最后一个真实 403、或异常交付给调用方的既有错误分支。
+    """
+    zen_body = dict(payload)
+    if zenize is not None:
+        zenize(zen_body)
+    resp403 = None
+    resp403_lane = ""
+    net_err = None
+    for lane in ("zen", "inference"):
+        left = _lane_cooling(lane)
+        if left:
+            logger.info("[%s] 通道 %s 冷却中（剩 %ds），跳过", rid, lane, left)
+            continue
+        try:
+            r = _post_lane(lane, path, zen_body if lane == "zen" else payload,
+                           seed, rid, timeout)
+        except requests.RequestException as e:
+            net_err = e
+            logger.error("[%s] 通道 %s 连接失败: %s: %s",
+                         rid, lane, type(e).__name__, str(e)[:160])
+            continue
+        if r.status_code == 403:
+            body = r.text[:400]
+            logger.warning("[%s] 通道 %s 上游 403: %s", rid, lane, body)
+            _dump_save(rid, "resp", r.text)
+            if "freetiererror" in body.lower() or "free tier" in body.lower():
+                _gate_mark(lane, rid, "FreeTierError")
+                resp403, resp403_lane = r, lane
+                continue
+            # 非 FreeTier 的 403（形状类问题）：不冷却，原样交付让人看见
+            return r, lane
+        if r.status_code == 429:
+            # 指纹已过、只是限流（FreeUsageLimitError）：短冷却防硬撞，429 原样
+            # 透传——客户端据此等一等再试，比吃 503 语义更准。
+            logger.warning("[%s] 通道 %s 上游 429 限流: %s",
+                           rid, lane, r.text[:200])
+            _gate_mark(lane, rid, "RateLimit", seconds=_COOLDOWN_429_S)
+            return r, lane
+        if r.status_code >= 400:
+            logger.warning("[%s] 通道 %s 上游错误 HTTP %s: %s",
+                           rid, lane, r.status_code, r.text[:400])
+            _dump_save(rid, "resp", r.text)
+            return r, lane
+        if lane != "zen":
+            logger.warning("[%s] zen 不可用，回落通道 %s 成功", rid, lane)
+        return r, lane
+    if resp403 is not None:
+        return resp403, resp403_lane
+    if net_err is not None:
+        raise net_err
+    left = max(_lane_cooling("zen"), _lane_cooling("inference"))
+    logger.warning("[%s] 双通道均在风控冷却（剩 %ds），本地快速失败",
+                   rid, int(left))
+    return _ErrResp(503, json.dumps({
+        "error": {"message": "upstream free tier flagged (403), cooldown %ds left, retry later" % int(left),
+                  "type": "overloaded_error"}})), "cooldown"
 
 
 app = Flask(__name__)
@@ -424,13 +612,16 @@ def _fetch_free(force: bool = False, quick: bool = False):
     last_err = None
     for attempt in range(attempts):
         try:
-            # 模型清单与推理同为匿名面，共用 _upstream_headers 的 `Bearer public`
-            # （对齐 opencode2api fetchModels：该头同样要带全量指纹）。
-            headers = _upstream_headers()
-            r = _upstream_session.get(API_BASE + "/models",
+            # 模型清单与推理同为匿名面；zen 优先（清单端点在两通道都在），
+            # zen 冷却时直接用 inference 的 V2 指纹头拉。
+            lane = "zen" if not _lane_cooling("zen") else "inference"
+            headers = _zen_headers() if lane == "zen" else _upstream_headers()
+            base = _LANES[lane]
+            r = _upstream_session.get(base + "/models",
                                       headers=headers, timeout=timeout)
             if r.status_code != 200:
-                logger.warning("[models] 清单拉取 HTTP %s", r.status_code)
+                logger.warning("[models] 清单拉取 HTTP %s (lane=%s)",
+                               r.status_code, lane)
                 return
             ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
             free_ids = _free_ids_from_names(ids)
@@ -546,11 +737,12 @@ def chat():
             t for t in GATE_TOOLS if t["function"]["name"] not in names]
     want_stream = bool(p.get("stream"))
 
-    # ── 通道一：直连 zen 网关（快，首帧 1~2s）──────────────────────────────────
-    # 连接被切断时补试一次，理由与边界见 _post_upstream。
+    # ── 通道一：直连 zen 网关（快，首帧 1~2s）；inference 回落 ─────────────────
+    # 连接被切断时补试一次，理由与边界见 _post_lane。
     try:
-        upstream = _post_upstream("/chat/completions", payload,
-                                  _session_seed(p), g.rid)
+        upstream, lane = _post_upstream("/chat/completions", payload,
+                                        _session_seed(p), g.rid,
+                                        zenize=_zenize_tools_chat)
     except requests.RequestException as e:
         # 必须在这里返回：upstream 不存在，继续往下走 upstream.status_code
         # 会抛 AttributeError，把网络故障伪装成 500。
@@ -560,7 +752,8 @@ def chat():
 
     if upstream.status_code >= 400:
         body = upstream.text[:400]
-        logger.warning("[%s] 上游错误 HTTP %s: %s", g.rid, upstream.status_code, body)
+        logger.warning("[%s] 上游错误 HTTP %s (lane=%s): %s",
+                       g.rid, upstream.status_code, lane, body)
         _dump_save(g.rid, "resp", upstream.text)
         return Response(upstream.text, status=upstream.status_code,
                         content_type=upstream.headers.get("Content-Type", "application/json"))
@@ -662,14 +855,15 @@ def responses_route():
     want_stream = bool(p.get("stream"))
 
     try:
-        upstream = _post_upstream("/responses", payload, _session_seed(p), g.rid)
+        upstream, lane = _post_upstream("/responses", payload, _session_seed(p), g.rid,
+                                        zenize=_zenize_tools_flat)
     except requests.RequestException as e:
         logger.error("[%s] 上游连接失败: %s: %s", g.rid, type(e).__name__, e)
         return jsonify(error={"message": str(e), "type": "upstream_error"}), 502
 
     if upstream.status_code >= 400:
-        logger.warning("[%s] 上游错误 HTTP %s: %s", g.rid,
-                       upstream.status_code, upstream.text[:400])
+        logger.warning("[%s] 上游错误 HTTP %s (lane=%s): %s", g.rid,
+                       upstream.status_code, lane, upstream.text[:400])
         _dump_save(g.rid, "resp", upstream.text)
         return Response(upstream.text, status=upstream.status_code,
                         content_type=upstream.headers.get("Content-Type", "application/json"))
@@ -755,16 +949,17 @@ def messages_route():
     want_stream = bool(p.get("stream"))
 
     try:
-        upstream = _post_upstream("/chat/completions", chat_payload,
-                                  _session_seed(chat_payload), g.rid)
+        upstream, lane = _post_upstream("/chat/completions", chat_payload,
+                                        _session_seed(chat_payload), g.rid,
+                                        zenize=_zenize_tools_chat)
     except requests.RequestException as e:
         logger.error("[%s] messages 上游连接失败: %s: %s", g.rid, type(e).__name__, e)
         return jsonify(anthropic_bridge.error_body("api_error", str(e))), 502
 
     if upstream.status_code >= 400:
         body = upstream.text[:400]
-        logger.warning("[%s] messages 上游错误 HTTP %s: %s", g.rid,
-                       upstream.status_code, body)
+        logger.warning("[%s] messages 上游错误 HTTP %s (lane=%s): %s",
+                       g.rid, upstream.status_code, lane, body)
         _dump_save(g.rid, "resp", upstream.text)
         err = anthropic_bridge.error_body(
             anthropic_bridge.err_type_for_http(upstream.status_code), body)

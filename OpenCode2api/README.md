@@ -55,16 +55,30 @@ Model    : /v1/models 返回的 id（当前免费清单见下方「免费模型�
 ### 协议翻译架构
 
 ```
-客户端                proxy 处理                      上游（/inference/v1）
+客户端                proxy 处理                      上游
 ─────────            ─────────────                  ─────────────
-Chat Completions ──→  直通                       ──→  /chat/completions
+Chat Completions ──→  直通                       ──→  /zen/v1（优先）→ /inference/v1（回落） /chat/completions
 Responses        ──→  原生透传（仅补闸门要件：     ──→  /responses
-                      stream:true、gate 四工具、
+                      stream:true、gate 工具、
                       会话头；模型字段原样）
 Anthropic        ──→  anthropic_bridge（双向翻译）──→  /chat/completions
 ```
 
 OpenCode 免费层的 muse-spark-\* 系上游原生说 Responses 协议，`/v1/responses` 不走翻译、字节级透传（与 Chat 通道分路）；`cache_control` 与 Anthropic 入站 `thinking` 配置在翻译层丢弃，Responses 透传路径协议字段原样直达上游。
+
+### 双通道（2026-10-18 起）
+
+上游免费层有两个匿名入口，`_post_upstream` 按 **zen 优先、inference 回落**逐请求选择：
+
+| | legacy `/zen/v1` | `/inference/v1`（2026-10-15 起） |
+|---|---|---|
+| UA 形状 | `opencode/1.18.31 (<os> <arch>; <rt>)`（v1.3.7 形） | `opencode/latest/2.0.29/cli`（2.x 形） |
+| `x-opencode-request` | **必发** | 禁发（存在即 403） |
+| `x-opencode-project` | `prj_`+24hex | 裸 40hex / global（不校验） |
+| 工具门禁 | **仅需一个名为 `read` 的工具**（别名 read_file/view_file 等自动匹配，缺失注入 deprecated stub） | bash+read 最少集 + 真实 schema |
+| 风控响应 | 403 FreeTierError → 冷却 600s；429 FreeUsageLimitError → 冷却 60s | 同左 |
+
+配套防再犯：403 FreeTierError 后**按通道**冷却（默认 600s，`UPSTREAM_COOLDOWN` 可调），冷却期内请求跳过该通道；两通道均在冷却时本地 503 快速失败。429 限流走 60s 短冷却（`UPSTREAM_COOLDOWN_429`）并原样透传。上游并发闸 `UPSTREAM_CONCURRENCY`（默认 4）限制同时在途请求数——2026-10-18 01:11 的 1MB 级 10 连发即触发 IP 级滥用标记，三模型全 403 秒拒。
 
 ## 配置
 
@@ -72,19 +86,23 @@ OpenCode 免费层的 muse-spark-\* 系上游原生说 Responses 协议，`/v1/r
 |---|---|---|
 | `API_KEY` | — | 本地鉴权 Bearer token |
 | `PORT` | `8390` | 监听端口 |
-| `ZEN_BASE` | `…/inference/v1` | 上游基址（⚠ `/zen/v1` 已作废，残留旧值导致 401/403） |
-| `UPSTREAM_AUTH` | `Bearer public` | 上游鉴权（免费层匿名，带 sk- key 反而 401） |
+| `API_BASE`（env `ZEN_BASE` 历史名） | `…/inference/v1` | inference 通道基址（`.env` 里残留的 `ZEN_BASE=…/inference/v1` 仍作用于它） |
+| `LEGACY_ZEN_BASE` | `…/zen/v1` | zen 通道基址（2026-10-18 起优先通道；⚠ 与历史 env `ZEN_BASE` 是两回事） |
+| `UPSTREAM_AUTH` | `Bearer public` | 上游鉴权（免费层匿名，两通道同） |
+| `UPSTREAM_COOLDOWN` | `600` | 403 FreeTierError 后该通道冷却秒数 |
+| `UPSTREAM_COOLDOWN_429` | `60` | 429 限流后该通道冷却秒数 |
+| `UPSTREAM_CONCURRENCY` | `4` | 上游并发闸（同时在途请求上限） |
 
 ## 免费层指纹
 
-上游对 free 模型有身份闸门，以下要件缺一即 `403 FreeTierError`：
+上游对 free 模型有身份闸门，要件缺一即 `403 FreeTierError`。两通道规格不同（详见「双通道」一节），以 `/inference/v1` 为例：
 
 | 要件 | 实现 |
 |---|---|
-| `User-Agent: opencode/latest/2.0.29/cli` | `OC_UA` 常量 |
-| 会话四头同值，降序时间戳格式 `ses_`+12hex+14base62 | `_stable_session()` 种子→会话映射 + 落盘 + 3 天 TTL |
-| `x-opencode-client: cli`、`x-opencode-project: global` | `_upstream_headers()` |
-| body 声明四件工具 `bash/glob/grep/read` | `GATE_TOOLS` |
+| `User-Agent: opencode/latest/2.0.29/cli` | `OC_UA` 常量（zen 通道为 1.18.31 旧形，见 `_zen_headers()`） |
+| 会话四头同值，降序时间戳格式 `ses_`+12hex+14base62 | `_stable_session()` 种子→会话映射 + 落盘 + 3 天 TTL（两通道共用） |
+| `x-opencode-client: cli`、`x-opencode-project: global` | `_upstream_headers()`（zen 通道为 `prj_`+24hex + 必发 `x-opencode-request`） |
+| body 声明四件工具 `bash/glob/grep/read` | `GATE_TOOLS`（zen 通道仅需一个 `read`，见 `_zenize_tools_chat()`） |
 | `stream: true` + `stream_options.include_usage: true` | `chat()` 构造 |
 | `Authorization: Bearer public` | `UPSTREAM_AUTH` |
 
