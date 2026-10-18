@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""routes_responses.py — OpenAI Responses 协议适配（/v1/responses）。
+"""routes/responses.py — OpenAI Responses 协议路由（/v1/responses）。
 
 muse-spark-* 等模型的上游原生说 Responses 协议，本层字节级透传（请求侧仅补
 闸门要件：stream:true、include_usage；闸门工具注入下沉各 lane，flat=True 走
@@ -13,7 +13,7 @@ from flask import Response, g, jsonify
 
 
 def register(app, core):
-    """挂载 responses 路由。core = server 模块（动态查找，见 routes_chat.py）。"""
+    """挂载 responses 路由。core = server 模块（动态查找，见 routes/chat.py）。"""
     logger = core.logger
 
     @app.route("/v1/responses", methods=["POST"])

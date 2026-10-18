@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lane_inference.py — /inference/v1 通道（自包含：本通道门禁的一切都在本文件）。
+"""lanes/inference.py — /inference/v1 通道（自包含：本通道门禁的一切都在本文件）。
 
 2026-10-11 上游迁移后的主通道；2026-10-18 起为回落通道（zen 优先）。上游改
 inference 门禁时只改本文件；server.py 通过 build_headers()/prepare_body()/BASE
@@ -19,7 +19,7 @@ inference 门禁时只改本文件；server.py 通过 build_headers()/prepare_bo
      （1.0.0→426、非法段→403）；x-opencode-project / JSON 键序 / 连接方式
      实测不参与校验；免费面鉴权 Authorization: Bearer public
 
-与 zen 通道（lane_zen.py）的分野：
+与 zen 通道（lanes/zen.py）的分野：
   UA 形状        2.x `opencode/latest/2.0.29/cli`  vs  v1.3.7 1.18.31 旧形
   x-opencode-request  禁发（存在即 403）           vs  必发
   x-opencode-project  不校验（global）             vs  prj_+24hex

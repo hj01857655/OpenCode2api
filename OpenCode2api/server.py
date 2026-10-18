@@ -3,15 +3,15 @@
 
 架构：**双通道直连 + 协议适配层**。
 
-通道（每通道一个自包含文件在仓库根，门禁规格全在各自文件里，上游改门禁
+通道（每通道一个自包含文件在 lanes/，门禁规格全在各自文件里，上游改门禁
 只改对应文件）：
-  lane_zen.py       legacy /zen/v1 —— v1.3.7 形状，仅需一个 read 工具（优先）
-  lane_inference.py /inference/v1 —— 2.x 指纹，bash+read 最少集（回落）
+  lanes/zen.py        legacy /zen/v1 —— v1.3.7 形状，仅需一个 read 工具（优先）
+  lanes/inference.py  /inference/v1 —— 2.x 指纹，bash+read 最少集（回落）
 
-协议层（adapters/，每协议一个文件，只放协议路由与翻译桥）：
-  adapters/routes_chat.py        /v1/chat/completions
-  adapters/routes_responses.py   /v1/responses
-  adapters/routes_messages.py    /v1/messages（经 adapters/anthropic_bridge.py 翻译）
+协议层（routes/ 每协议一个文件；adapters/ 只放翻译桥）：
+  routes/chat.py                 /v1/chat/completions
+  routes/responses.py            /v1/responses
+  routes/messages.py             /v1/messages（经 adapters/anthropic.py 翻译）
 
 server.py 只留公共设施：session 指纹（两通道同源校验，共用缓存）、dumps、
 模型清单、通道选择与冷却调度、协议层挂载。
@@ -40,10 +40,14 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, Response, g, jsonify, request
 
-from adapters import anthropic_bridge   # noqa: F401 兼容旧探针的 server.anthropic_bridge
-from adapters import routes_chat, routes_messages, routes_responses
-import lane_inference
-import lane_zen
+from adapters import anthropic
+from routes import chat, messages, responses
+from lanes import inference, zen
+
+# 兼容别名：旧探针/测试引用的旧模块名（lane_zen / lane_inference / anthropic_bridge）
+lane_zen = zen
+lane_inference = inference
+anthropic_bridge = anthropic
 
 load_dotenv()
 
@@ -53,17 +57,17 @@ LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = int(os.getenv("PORT", "8390"))
 
 # ── 通道注册表（每通道一个自包含文件，门禁规格全在各自 lane 文件里）────────────
-_LANE_MODS = {"zen": lane_zen, "inference": lane_inference}
+_LANE_MODS = {"zen": zen, "inference": inference}
 # 通道顺序：UPSTREAM_LANES 逗号分隔（默认 zen 优先、inference 回落）。
 _LANE_ORDER = [s.strip() for s in
                os.environ.get("UPSTREAM_LANES", "zen,inference").split(",")
                if s.strip() in _LANE_MODS] or ["zen", "inference"]
 # 兼容别名：旧引用点（_fetch_free / 探针）仍可用
-API_BASE = lane_inference.BASE
-LEGACY_ZEN_BASE = lane_zen.BASE
+API_BASE = inference.BASE
+LEGACY_ZEN_BASE = zen.BASE
 _LANES = {name: mod.BASE for name, mod in _LANE_MODS.items()}
 # 上游已废弃模型（实测 410 ModelDeprecated）：剔除，避免误调必失败
-DEPRECATED = lane_inference.DEPRECATED
+DEPRECATED = inference.DEPRECATED
 
 # ── 日志（与 cline2api / qoder2api 同一标准）──────────────────────────────────
 LOG_FILE = os.path.join(BASE, "request.log")
@@ -252,22 +256,22 @@ def _stable_session(seed: str) -> str:
 
 
 # 闸门工具规格已下沉到各 lane 文件（每通道自包含）：
-#   lane_zen.GATE.../prepare_body   —— zen 通道仅需一个 read
-#   lane_inference.GATE_TOOLS       —— bash+read 最少集 + glob/grep
+#   zen.GATE.../prepare_body   —— zen 通道仅需一个 read
+#   inference.GATE_TOOLS       —— bash+read 最少集 + glob/grep
 # 此处仅保留兼容别名（探针/旧脚本引用），路由不再使用。
-GATE_TOOLS = lane_inference.GATE_TOOLS
-GATE_TOOLS_FLAT = lane_inference.GATE_TOOLS_FLAT
-UPSTREAM_AUTH = lane_inference.AUTH
+GATE_TOOLS = inference.GATE_TOOLS
+GATE_TOOLS_FLAT = inference.GATE_TOOLS_FLAT
+UPSTREAM_AUTH = inference.AUTH
 
 
 def _upstream_headers(seed: str = "") -> dict:
-    """inference 通道指纹头（薄代理，规格见 lane_inference.py）。"""
-    return lane_inference.build_headers(_stable_session(seed))
+    """inference 通道指纹头（薄代理，规格见 inference.py）。"""
+    return inference.build_headers(_stable_session(seed))
 
 
 def _zen_headers(seed: str = "") -> dict:
-    """zen 通道指纹头（薄代理，规格见 lane_zen.py）。"""
-    return lane_zen.build_headers(_stable_session(seed))
+    """zen 通道指纹头（薄代理，规格见 zen.py）。"""
+    return zen.build_headers(_stable_session(seed))
 
 
 # ── 上游转发：共享连接池 + 连接级单次重试 ────────────────────────────────────
@@ -625,19 +629,19 @@ def models():
         for mid in _free["ids"]])
 
 
-PASSTHROUGH = routes_chat.PASSTHROUGH   # 兼容旧引用（实际使用在 adapters/routes_chat.py）
+PASSTHROUGH = chat.PASSTHROUGH   # 兼容旧引用（实际使用在 routes/chat.py）
 
 
-# ── 协议适配层挂载（adapters/）：每协议一个文件，本文件只做调度 ────────────────
+# ── 协议路由层挂载（routes/）：每协议一个文件，本文件只做调度 ──────────────────
 # register(app, core) 里 core 传本模块：路由经模块属性动态查找调度函数
 # （_post_upstream / _model_free / _session_seed / _dump_save / logger），
-# 测试对 server._post_upstream 等的打桩替换因此对适配层同样生效。
+# 测试对 server._post_upstream 等的打桩替换因此对路由层同样生效。
 import sys as _sys
 
 _core = _sys.modules[__name__]
-routes_chat.register(app, _core)
-routes_responses.register(app, _core)
-routes_messages.register(app, _core)
+chat.register(app, _core)
+responses.register(app, _core)
+messages.register(app, _core)
 
 
 if __name__ == "__main__":

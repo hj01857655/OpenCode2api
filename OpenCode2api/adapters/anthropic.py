@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""anthropic_bridge.py — Anthropic Messages ⇄ OpenAI Chat Completions 协议桥
+"""anthropic.py — Anthropic Messages ⇄ OpenAI Chat Completions 协议翻译
 
-与 responses_bridge.py 同构的中间翻译层。背景：Claude Code / Kiro 这类
+与 adapters/responses.py 同构的中间翻译层。背景：Claude Code / Kiro 这类
 客户端原生只说 Anthropic Messages 协议（POST /v1/messages，SSE 每帧
 `event: <type>\\ndata: <json>\\n\\n`）。上游免费层只出 Chat Completions，
 且 /inference/v1/messages 是付费凭证面（免费模型 403 FreeTierError、付费
 模型 401 Missing API key，2026-10-15 实测），走不了直通。所以本模块在本地
 把协议翻掉，上游照旧走 chat 线。
 
-对外三个口子（与 responses_bridge 对齐）：
+对外三个口子（与 responses.py 对齐）：
   请求侧  anthropic_to_chat(body)            Anthropic 请求体 -> Chat 请求体
   响应侧  chat_sse_to_anthropic(stream, m)    Chat SSE 字节流 -> Anthropic SSE
           chat_json_to_anthropic(chat, m)     非流式 Chat JSON -> Anthropic JSON

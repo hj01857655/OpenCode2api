@@ -11,7 +11,7 @@
 import json
 
 import server
-from adapters import anthropic_bridge as ab
+from adapters import anthropic as ab
 
 
 class FakeUpstream:

@@ -64,29 +64,30 @@ Responses        ──→  原生透传（仅补闸门要件：     ──→  
 Anthropic        ──→  anthropic_bridge（双向翻译）──→  /chat/completions
 ```
 
-### 目录结构（adapters/ 只放协议层，通道在仓库根）
+### 目录结构（routes/ 协议路由 + lanes/ 通道 + adapters/ 翻译桥）
 
 ```
 OpenCode2api/
 ├── server.py                 # bootstrap：常量、session 指纹、双通道调度与冷却、
 │                             #   模型清单、鉴权/rid 中间件、app.run（只做调度）
-├── lane_zen.py               # zen 通道门禁全套（自包含：指纹+read 桥）
-├── lane_inference.py         # inference 通道门禁全套（自包含：V2 指纹+闸门工具）
-├── adapters/                 # 协议适配层：每协议一个文件，只放协议路由与翻译桥
-│   ├── routes_chat.py        #   /v1/chat/completions（流式透传 + 非流式聚合）
-│   ├── routes_responses.py   #   /v1/responses（muse-spark 原生字节透传）
-│   ├── routes_messages.py    #   /v1/messages（经 anthropic_bridge 翻译）
-│   ├── anthropic_bridge.py   #   Anthropic ⇄ Chat 双向翻译
-│   └── responses_bridge.py   #   Responses ⇄ Chat 翻译（本仓当前未挂载，六仓同步留档）
+├── lanes/                    # 通道层：每通道一个自包含文件（门禁规格全在本文件）
+│   ├── zen.py                #   zen 通道（指纹+read 桥）
+│   └── inference.py          #   inference 通道（V2 指纹+闸门工具）
+├── routes/                   # 协议路由层：每协议一个文件
+│   ├── chat.py               #   /v1/chat/completions（流式透传 + 非流式聚合）
+│   ├── responses.py          #   /v1/responses（muse-spark 原生字节透传）
+│   └── messages.py           #   /v1/messages（经 adapters/anthropic.py 翻译）
+├── adapters/                 # 协议翻译层：⇄ Chat 双向翻译
+│   ├── anthropic.py          #   Anthropic ⇄ Chat
+│   └── responses.py          #   Responses ⇄ Chat（本仓当前未挂载，六仓同步留档）
 ├── test_*.py                 # 离线路由测试（打桩 _post_upstream，不起真实服务）
 ├── probe_*.py                # 门禁消融探针（历史证据，一锤子买卖脚本）
 └── docs/labs/                # 门禁定案文档
 ```
 
-上游改协议形状 → 改对应 `adapters/routes_*.py`；改通道门禁 → 改对应根目录
-`lane_*.py`；都不用动 `server.py`。路由经 `register(app, core)` 挂载，`core`
-即 server 模块（动态属性查找），测试对 `server._post_upstream` 等的打桩对
-适配层同样生效。
+上游改协议形状 → 改对应 `routes/*.py`；改通道门禁 → 改对应 `lanes/*.py`；
+都不用动 `server.py`。路由经 `register(app, core)` 挂载，`core` 即 server 模块
+（动态属性查找），测试对 `server._post_upstream` 等的打桩对路由层同样生效。
 
 OpenCode 免费层的 muse-spark-\* 系上游原生说 Responses 协议，`/v1/responses` 不走翻译、字节级透传（与 Chat 通道分路）；`cache_control` 与 Anthropic 入站 `thinking` 配置在翻译层丢弃，Responses 透传路径协议字段原样直达上游。
 

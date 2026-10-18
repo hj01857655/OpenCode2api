@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""responses_bridge.py — OpenAI Responses <-> Chat Completions 协议桥（各 2api 项目共用）
+"""responses.py — OpenAI Responses ⇄ Chat Completions 协议翻译（各 2api 项目共用）
 
 背景：grok-build / Codex 这类 agent 客户端原生只说 Responses 协议（SSE 每帧
 必须带 sequence_number，类型级强制）。各 2api 上游管线只出 Chat Completions。

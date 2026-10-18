@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""routes_chat.py — OpenAI Chat Completions 协议适配（/v1/chat/completions）。
+"""routes/chat.py — OpenAI Chat Completions 协议路由（/v1/chat/completions）。
 
 流式：上游 SSE 字节级透传（上游只收流式请求，stream 由本层强制置 true）；
 非流式：本地聚合 SSE 成 Chat JSON（content / reasoning_content / tool_calls /
-usage 全量还原）。闸门工具注入已下沉各 lane（adapters/lane_*.py），本层只管
-协议形状，不掺和通道门禁。
+usage 全量还原）。闸门工具注入已下沉各通道（lanes/*.py），本层只管协议形状，
+不掺和通道门禁。
 """
 import json
 import time

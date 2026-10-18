@@ -1,1 +1,1 @@
-# adapters/ — 协议适配层：三协议路由 + 协议翻译桥（通道 lane_*.py 在仓库根）
+# adapters/ — 协议翻译层：Anthropic/Responses ⇄ Chat 双向翻译

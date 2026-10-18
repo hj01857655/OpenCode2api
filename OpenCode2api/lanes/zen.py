@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""lane_zen.py — legacy /zen/v1 通道（自包含：本通道门禁的一切都在本文件）。
+"""lanes/zen.py — legacy /zen/v1 通道（自包含：本通道门禁的一切都在本文件）。
 
 上游改 zen 门禁时只改本文件；server.py 通过 build_headers()/prepare_body()/BASE
 使用本通道，不含任何 zen 专属逻辑。规格来源：jasonxu114514/opencode2api
 076451f / 2319941 / a9470df 定案；本地探测实证（2026-10-18）：本指纹已过闸
 ——429 FreeUsageLimitError = 形状接受仅限流；403 FreeTierError = 形状/标记被拒。
 
-门禁规格（与 /inference/v1 的差异见 lane_inference.py 头注）：
+门禁规格（与 /inference/v1 的差异见 lanes/inference.py 头注）：
   1) UA：v1.3.7 形 `opencode/1.18.31 (<os> <arch>; <rt>)`
   2) x-opencode-request：必发（inference 通道禁发，存在即 403）
   3) x-opencode-project：`prj_`+24hex 形状（值不校验）
