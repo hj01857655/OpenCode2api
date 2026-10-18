@@ -345,6 +345,9 @@ _COOLDOWN_S = int(os.getenv("UPSTREAM_COOLDOWN", "600"))          # 403 指纹�
 _COOLDOWN_429_S = int(os.getenv("UPSTREAM_COOLDOWN_429", "60"))   # 429 限流
 _gate = {"zen": 0.0, "inference": 0.0}
 _gate_lock = threading.Lock()
+# 各通道最后一次 FreeTierError 的原始错误体：冷却期快速失败时原样透传，
+# 让客户端看到上游真实拒绝原因，而不是被合成 503 掩盖。
+_freetier_body = {"zen": None, "inference": None}
 
 
 def _lane_cooling(lane):
@@ -399,7 +402,8 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
     返回 (Response, lane)。每通道的 body 准备由各自 lane 模块完成（自包含
     门禁规格），server 不掺和通道细节。403 FreeTierError 触发该通道冷却并
     继续下一通道；所有通道都不可用（都在冷却 / 都 403 / 都断连）时分别以
-    503 合成响应、最后一个真实 403、或异常交付给调用方的既有错误分支。
+    缓存的真实 403（无缓存才 503 合成）、最后一个真实 403、或异常交付给调用方
+    的既有错误分支。
     """
     resp403 = None
     resp403_lane = ""
@@ -425,6 +429,7 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
             if r.status_code == 403 and ("freetiererror" in body.lower()
                                          or "free tier" in body.lower()):
                 _gate_mark(lane, rid, "FreeTierError")
+                _freetier_body[lane] = r.text
                 resp403, resp403_lane = r, lane
                 continue
             if r.status_code == 404:
@@ -458,6 +463,13 @@ def _post_upstream(path: str, payload: dict, seed: str, rid: str,
     if net_err is not None:
         raise net_err
     left = max(_lane_cooling(l) for l in _LANE_ORDER)
+    cached = next((_freetier_body[l] for l in _LANE_ORDER
+                   if _lane_cooling(l) and _freetier_body[l]), None)
+    if cached is not None:
+        # 冷却 ≠ 掩盖：把触发冷却的那份真实 403 原样交给客户端
+        logger.warning("[%s] 全部通道均在风控冷却（剩 %ds），透传缓存的真实 403",
+                       rid, int(left))
+        return _ErrResp(403, cached), "cooldown"
     logger.warning("[%s] 全部通道均在风控冷却（剩 %ds），本地快速失败",
                    rid, int(left))
     return _ErrResp(503, json.dumps({
