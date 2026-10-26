@@ -1,0 +1,21 @@
+services:
+  opencode2api:
+    build: .
+    container_name: opencode2api
+    restart: unless-stopped
+    ports:
+      - "8390:8390"
+    environment:
+      - API_KEY=${API_KEY}
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-8390}
+      - OPENCODE2API_STATE_DIR=${OPENCODE2API_STATE_DIR:-/app/data}
+      - UPSTREAM_AUTH=${UPSTREAM_AUTH:-Bearer public}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - opencode2api_net
+
+networks:
+  opencode2api_net:
+    driver: bridge
