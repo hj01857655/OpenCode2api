@@ -72,7 +72,12 @@ func (s *Server) nextRID() string {
 	return fmt.Sprintf("r%04d", s.reqSeq.Add(1))
 }
 
-// Handler 组装路由。鉴权中间件包在最外层（/health 例外）。
+// logSkip 面板与其 API 不进请求日志（面板轮询会刷屏；/health 保持原有行为）。
+var logSkip = map[string]bool{
+	"/admin": true, "/admin/api/overview": true, "/admin/api/refresh-models": true,
+}
+
+// Handler 组装路由。鉴权中间件包在最外层（/health 与面板页例外）。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.health)
@@ -80,6 +85,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", s.chat)
 	mux.HandleFunc("/v1/responses", s.responses)
 	mux.HandleFunc("/v1/messages", s.anthropic)
+	mux.HandleFunc("/admin", s.panelOr404)
+	mux.HandleFunc("/admin/api/overview", s.adminOverview)
+	mux.HandleFunc("/admin/api/refresh-models", s.adminRefreshModels)
 	return s.auth(mux)
 }
 
@@ -92,7 +100,9 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		// 与 Python 版逐字对齐：整串比对 Authorization == "Bearer "+API_KEY。
 		// （routes/anthropic.py 的 docstring 提到 x-api-key，但 before_request
 		// 源码并没有放行它——以源码为准，不放宽鉴权面。）
-		if s.Cfg.APIKey != "" && r.URL.Path != "/health" {
+		// 面板页 /admin 例外：浏览器要能直接打开；其下的 /admin/api/* 仍走鉴权，
+		// 面板自己带着存的 API_KEY 来调。
+		if s.Cfg.APIKey != "" && r.URL.Path != "/health" && r.URL.Path != "/admin" {
 			if r.Header.Get("Authorization") != "Bearer "+s.Cfg.APIKey {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 				return
@@ -110,7 +120,9 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			}
 			r.Body = io.NopCloser(bytes.NewReader(rawBody))
 		}
-		s.logIn(rid, r, payload, bodyLen)
+		if !logSkip[r.URL.Path] {
+			s.logIn(rid, r, payload, bodyLen)
+		}
 
 		// chat 与 messages 两条协议路径落 req 原文（可直接重放的纯 body，绝不落 header）
 		switch r.URL.Path {

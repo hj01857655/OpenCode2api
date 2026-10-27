@@ -87,6 +87,7 @@ func main() {
 	fmt.Printf("OpenCode2api (the unit2api) 启动: http://%s\n", schemeHost)
 	fmt.Printf("OpenAI Base URL:    http://%s/v1\n", schemeHost)
 	fmt.Printf("Anthropic Base URL: http://%s\n", schemeHost)
+	fmt.Printf("面板:               http://%s/admin\n", schemeHost)
 	fmt.Printf("通道: %s\n", laneNames(cfg))
 	fmt.Printf("free 模型: %d 个\n", freeList.Count())
 	if cfg.APIKey != "" {

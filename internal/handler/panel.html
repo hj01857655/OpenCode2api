@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenCode2api</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--line:#262b36;--tx:#e6e9ef;--dim:#8b93a3;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24;--acc:#6ea8fe}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:18px;margin:0 0 4px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:16px;flex-wrap:wrap}
+.tabs button{background:none;border:none;color:var(--dim);padding:8px 14px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent}
+.tabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:14px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:13px}
+.kv b{color:var(--dim);font-weight:400}
+button{background:var(--acc);border:none;border-radius:6px;color:#0b1220;padding:7px 14px;cursor:pointer;font-size:13px;font-weight:600}
+button.ghost{background:none;border:1px solid var(--line);color:var(--tx);font-weight:400}
+button:disabled{opacity:.45;cursor:default}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:400}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.dim{color:var(--dim)}
+.badge{display:inline-block;border-radius:99px;padding:1px 9px;font-size:11px;font-weight:600}
+.badge.on{background:#14321f;color:var(--ok)}.badge.off{background:#321414;color:var(--bad)}
+.mono{font-family:Consolas,monospace;font-size:12px}
+#msg{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1f2430;border:1px solid var(--line);border-radius:8px;padding:10px 18px;font-size:13px;display:none;max-width:80vw}
+input{background:#0d0f13;border:1px solid var(--line);border-radius:6px;color:var(--tx);padding:7px 10px;font-size:13px;width:180px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>OpenCode2api 控制台</h1>
+<div class="tabs">
+<button class="on" onclick="tab(this,'vMain')">概览</button>
+<button onclick="tab(this,'vDiag')">诊断</button>
+</div>
+<div id="vMain"></div>
+<div id="vDiag" style="display:none"></div>
+</div>
+<div id="msg"></div>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+function authHeaders(){const k=localStorage.oc_apikey;if(!k)return{"Content-Type":"application/json"};return{"Content-Type":"application/json","Authorization":"Bearer "+k}}
+const api=(p,opt={})=>fetch("/admin/api/"+p,Object.assign({headers:authHeaders()},opt)).then(r=>r.json()).catch(e=>({ok:false,message:String(e)}));
+const POST=(p,b)=>api(p,{method:"POST",body:JSON.stringify(b||{})});
+let tt;function toast(t,bad){const m=$("#msg");m.textContent=t;m.style.display="block";m.style.color=bad?"var(--bad)":"var(--tx)";clearTimeout(tt);tt=setTimeout(()=>m.style.display="none",3500)}
+function esc(s){const d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML}
+function tab(btn,id){document.querySelectorAll(".tabs button").forEach(b=>b.classList.remove("on"));btn.classList.add("on");
+  $("#vMain").style.display=id==="vMain"?"":"none";$("#vDiag").style.display=id==="vDiag"?"":"none"}
+function saveKey(){localStorage.oc_apikey=document.getElementById("k").value;toast("已保存");load()}
+
+async function load(){
+  const o=await api("overview");
+  if(!o.service){
+    $("#vMain").innerHTML=o.error==="unauthorized"
+      ?'<div class="card"><h3>本地鉴权已开启</h3><div class="kv"><b>API Key</b><span><input id="k" placeholder="API_KEY" value="'+esc(localStorage.oc_apikey||"")+'"> <button onclick="saveKey()">保存</button></span></div><div class="dim" style="font-size:12px">API_KEY 非空时，面板 API 与转发票据同一把钥匙。</div></div>'
+      :'<div class="card bad">overview 加载失败：'+esc(o.message||o.error||"")+'</div>';
+    return}
+  const c=o.credential||{};
+  const fresh=o.list_age_s>=0&&o.list_age_s<600;
+  $("#vMain").innerHTML=`
+  <div class="card"><h3>服务</h3><div class="kv">
+    <b>路由</b><span class="mono">${esc(o.route||"—")}</span>
+    <b>free 模型</b><span>${o.free_models??0} 个 ${o.list_age_s<0?'<span class="warn">（尚未联系上上游，用落盘兜底清单）</span>':`<span class="${fresh?"ok":"warn"}">（清单 ${o.list_age_s}s 前更新）</span>`}</span>
+    <b>本地鉴权</b><span>${o.local_auth?`<span class="badge on">API_KEY 已开启</span> <input id="k" placeholder="API Key" value="${esc(localStorage.oc_apikey||"")}"> <button class="ghost" onclick="saveKey()">保存</button>`:'<span class="badge off">未开启（仅回环）</span>'}</span>
+  </div></div>
+  <div class="card"><h3>凭据</h3><div class="kv">
+    <b>模式</b><span>${esc(c.mode||"—")} ${c.valid?'<span class="badge on">有效</span>':'<span class="badge off">无效</span>'}</span>
+    ${c.notice?`<b>说明</b><span class="dim">${esc(c.notice)}</span>`:""}
+  </div></div>
+  <div class="card"><h3>上游通道</h3><table><tr><th>通道</th><th>基址</th><th>鉴权</th><th>冷却</th></tr>
+    ${(o.lanes||[]).map(l=>`<tr><td>${esc(l.name)}</td><td class="dim mono" style="font-size:11px">${esc(l.base)}</td>
+    <td class="dim">${l.auth_mode==="default"?"匿名面（public）":"自定义"}</td>
+    <td>${l.cooldown_s>0?`<span class="bad">冷却中 ${l.cooldown_s}s</span>`:'<span class="ok">正常</span>'}</td></tr>`).join("")}</table></div>
+  <div class="card"><h3>免费模型</h3><table><tr><th>模型</th><th>面</th></tr>
+    ${(o.models||[]).map(m=>`<tr><td class="mono">${esc(m.id)}</td><td class="ok">free</td></tr>`).join("")||'<tr><td colspan="2" class="dim">空（上游未返回任何 free 模型）</td></tr>'}</table></div>`;
+  $("#vDiag").innerHTML=`
+  <div class="card"><h3>免费清单</h3><button onclick="doRefresh(this)">强制重拉清单</button> <span id="rfOut" class="dim">后台线程每 60s 自查，清单 TTL 10 分钟</span></div>
+  <div class="card"><h3>冷却说明</h3><div class="dim" style="font-size:12px">上游 403（FreeTierError）→ 该通道冷却 600s；429 限流 → 短冷却 60s，到期自动恢复。通道实时状态见概览页「上游通道」。</div></div>`;
+}
+async function doRefresh(btn){btn.disabled=true;const r=await POST("refresh-models");
+  $("#rfOut").innerHTML=`<span class="${r.ok?"ok":"bad"}">${r.ok?("已刷新，当前 "+r.free_models+" 个 free 模型"):esc(r.message||"失败")}</span>`;btn.disabled=false;load()}
+load();
+</script>
+</body>
+</html>

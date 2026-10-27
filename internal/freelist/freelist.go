@@ -263,6 +263,14 @@ func (l *List) IDs() []string {
 	return append([]string(nil), l.ids...)
 }
 
+// LastContact 上次「联系上上游」的时刻（新鲜度语义与 Fetch 里的 at 一致）。
+// 零值 = 启动后尚未联系上（可能还在用落盘兜底清单）。面板概览用。
+func (l *List) LastContact() time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.at
+}
+
 // Count 当前清单长度（/health 用）。
 func (l *List) Count() int {
 	l.mu.Lock()

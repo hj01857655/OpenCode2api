@@ -360,6 +360,72 @@ func (s *Server) anthropic(w http.ResponseWriter, r *http.Request) {
 	writeRaw(w, http.StatusOK, "application/json", body)
 }
 
+// ── 管理面板 API ─────────────────────────────────────────────────────────────
+
+func (s *Server) panelOr404(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/admin" {
+		http.NotFound(w, r)
+		return
+	}
+	s.servePanel(w)
+}
+
+// adminOverview 面板概览。免费层是匿名面（上游只认字面 `Bearer public`），
+// 没有凭据可管理——credential.valid 恒为 true，真正的健康信号是通道冷却与
+// 清单新鲜度，不在这里硬造登录态。
+func (s *Server) adminOverview(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	lanes := make([]any, 0, len(s.Cfg.Lanes))
+	for _, lc := range s.Cfg.Lanes {
+		lanes = append(lanes, map[string]any{
+			"name": lc.Name,
+			"base": lc.Base,
+			// UPSTREAM_AUTH 可能被覆盖成真实 key，只报形态不回显值
+			"auth_mode":  map[bool]string{true: "default", false: "custom"}[lc.Auth == "Bearer public"],
+			"cooldown_s": s.Up.RemainingCooling(lc.Name),
+		})
+	}
+	ids := s.Free.IDs()
+	models := make([]any, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, map[string]any{"id": id, "free": true})
+	}
+	at := s.Free.LastContact()
+	age := -1 // -1 = 启动后尚未联系上上游（可能在用落盘兜底清单）
+	if !at.IsZero() {
+		age = int(time.Since(at).Seconds())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": "OpenCode2api",
+		"credential": map[string]any{
+			"mode":   "anonymous",
+			"valid":  true,
+			"notice": "免费层匿名面（Bearer public），无凭据可管理；健康信号看通道冷却与清单新鲜度",
+		},
+		"route":       "zen-direct",
+		"lanes":       lanes,
+		"models":      models,
+		"free_models": len(ids),
+		"list_age_s":  age,
+		"local_auth":  s.Cfg.APIKey != "",
+	})
+}
+
+// adminRefreshModels 强制重拉免费清单（后台线程平时 60s 一醒，这里给手动入口）。
+func (s *Server) adminRefreshModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	s.Free.Fetch(true, false)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "free_models": s.Free.Count(),
+	})
+}
+
 // ── 流式转发 ─────────────────────────────────────────────────────────────────
 
 // passthroughStream 上游 SSE 字节级透传（chat / responses 线）。
